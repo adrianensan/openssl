@@ -17,22 +17,12 @@ TARGET_MACOS_X86_64="macos-x86_64";
 
 BASE_DIR="$(pwd)"
 BUILD_DIR="$(pwd)/build"
-OUTPUT_DIR_BASE="${BUILD_DIR}/output"
+OUTPUT_DIR="${BUILD_DIR}/output"
 LOGS_PATH="${BUILD_DIR}/logs"
 INFO_PLIST_PATH="$(pwd)/resources/Info.plist"
 
-PLATFORM=""
-TARGETS=""
-OUTPUT_DIR=""
-XCFRAMEWORK_CREATE_ARGS=""
-
-ORIGINAL_PATH=$PATH
-
-function targets { case "$1" in
-  $PLATFORM_APPLE) echo "$(targets ${PLATFORM_IOS}) $(targets ${PLATFORM_MACOS})";;
-  $PLATFORM_IOS) echo "${TARGET_IOS_DEVICE_ARM64} ${TARGET_IOS_SIMULATOR_ARM64} ${TARGET_IOS_SIMULATOR_X86_64}";;
-  $PLATFORM_MACOS) echo "${TARGET_MACOS_ARM64} ${TARGET_MACOS_X86_64}";;
-esac }
+ALL_TARGETS="${TARGET_IOS_DEVICE_ARM64} ${TARGET_IOS_SIMULATOR_ARM64} ${TARGET_IOS_SIMULATOR_X86_64} ${TARGET_MACOS_ARM64} ${TARGET_MACOS_X86_64}"
+XCFRAMEWORK_PATH="${OUTPUT_DIR}/OpenSSL.xcframework"
 
 function min_os_version {
   case $(platform $1) in
@@ -43,7 +33,7 @@ function min_os_version {
 
 function config_flags {
   case $(platform $1) in
-    $PLATFORM_IOS) echo "-mios-version-min=${IOS_MIN_OS_VERSION}";;
+    $PLATFORM_IOS) echo "no-shared -mios-version-min=${IOS_MIN_OS_VERSION}" -fembed-bitcode;;
     $PLATFORM_MACOS) echo "-mmacosx-version-min=${MACOS_MIN_OS_VERSION}";;
   esac
 }
@@ -113,34 +103,6 @@ function build_openssl { target="${1}"
   fi
 }
 
-function make_framework { target="${1}"
-  openssl_path="${BUILD_DIR}/openssl-output/${target}"
-  framework_path="${OUTPUT_DIR}/frameworks/${target}/OpenSSL.framework"
-  mkdir -p "${framework_path}/Headers"
-  libtool -static -no_warning_for_no_symbols \
-    -o ${framework_path}/OpenSSL \
-    "${openssl_path}/lib/libcrypto.a" "${openssl_path}/lib/libssl.a"
-  cp -r ${openssl_path}/include/openssl/* ${framework_path}/Headers/
-  cp $INFO_PLIST_PATH ${framework_path}/Info.plist
-  /usr/libexec/PlistBuddy -c "Set :MinimumOSVersion $(min_os_version $target)" ${framework_path}/Info.plist
-  
-  if [ "$(platform $target)" == $PLATFORM_MACOS ]; then
-    cd $framework_path
-    mkdir "Versions"
-    mkdir "Versions/A"
-    mkdir "Versions/A/Resources"
-    mv "OpenSSL" "Headers" "Versions/A"
-    mv "Info.plist" "Versions/A/Resources"
-  
-    (cd "Versions" && ln -s "A" "Current")
-    ln -s "Versions/Current/OpenSSL"
-    ln -s "Versions/Current/Headers"
-    ln -s "Versions/Current/Resources"
-  fi
-  
-  XCFRAMEWORK_CREATE_ARGS+="-framework ${framework_path} "
-}
-
 function make_xcframework { target="${1}"
   openssl_path="${BUILD_DIR}/openssl-output/${target}"
   framework_path="${XCFRAMEWORK_PATH}/${target}"
@@ -154,8 +116,6 @@ function make_xcframework { target="${1}"
 function build_target { target="${1}"
   build_openssl ${target}
   make_xcframework ${target}
-
-  PATH=$ORIGINAL_PATH
 }
 
 while test $# -gt 0; do
@@ -180,7 +140,7 @@ while test $# -gt 0; do
       progress_show "Cleaning up"
       rm -rf "target" &>/dev/null
       rm -rf "${BUILD_DIR}" &>/dev/null
-      rm -rf "${OUTPUT_DIR_BASE}" &>/dev/null
+      rm -rf "${OUTPUT_DIR}" &>/dev/null
       progress_end $?
       shift;;
     -v|--verbose) OUTPUT=/dev/tty; shift;;
@@ -192,62 +152,40 @@ while test $# -gt 0; do
   esac
 done
 
-if [ -z "${PLATFORM}" ]; then
-  printf "Invalid argument ${!#}\n"
-  trap - EXIT
-  $(pwd)/build.sh --help
-  exit
-fi
-
-TARGETS="$(targets ${PLATFORM})"
-OUTPUT_DIR="${OUTPUT_DIR_BASE}/${PLATFORM}"
-export XCFRAMEWORK_PATH="${OUTPUT_DIR}/OpenSSL.xcframework"
 rm -r $OUTPUT_DIR &>/dev/null
 rm -r $LOGS_PATH &>/dev/null
 mkdir -p "${LOGS_PATH}"
-mkdir -p "${OUTPUT_DIR}"
-
 mkdir -p "${XCFRAMEWORK_PATH}"
-cp $INFO_PLIST_PATH "${OUTPUT_DIR}/OpenSSL.xcframework/Info.plist"
 
-echo $TARGETS
-for target in ${TARGETS}; do
+cp $INFO_PLIST_PATH "${XCFRAMEWORK_PATH}/Info.plist"
+
+for target in ${ALL_TARGETS}; do
   build_target ${target}
 done
 
-mkdir -p "${OUTPUT_DIR}/OpenSSL.xcframework/macos-arm64_x86_64"
-cp -r "${OUTPUT_DIR}/OpenSSL.xcframework/macos-arm64/Headers" \
-      "${OUTPUT_DIR}/OpenSSL.xcframework/macos-arm64_x86_64/Headers"
+# Combine macOS libraries
+mkdir -p "${XCFRAMEWORK_PATH}/macos-arm64_x86_64"
+cp -r "${XCFRAMEWORK_PATH}/macos-arm64/Headers" \
+      "${XCFRAMEWORK_PATH}/macos-arm64_x86_64/Headers"
 lipo -create \
-     "${OUTPUT_DIR}/OpenSSL.xcframework/macos-arm64/OpenSSL.a" \
-     "${OUTPUT_DIR}/OpenSSL.xcframework/macos-x86_64/OpenSSL.a" \
-     -o "${OUTPUT_DIR}/OpenSSL.xcframework/macos-arm64_x86_64/OpenSSL.a"
+     "${XCFRAMEWORK_PATH}/macos-arm64/OpenSSL.a" \
+     "${XCFRAMEWORK_PATH}/macos-x86_64/OpenSSL.a" \
+     -o "${XCFRAMEWORK_PATH}/macos-arm64_x86_64/OpenSSL.a"
      
-rm -r "${OUTPUT_DIR}/OpenSSL.xcframework/macos-arm64"
-rm -r "${OUTPUT_DIR}/OpenSSL.xcframework/macos-x86_64"
-     
-# mkdir -p "${OUTPUT_DIR}/OpenSSL.xcframework/ios-arm64_x86_64-simulator"
-# cp -r "${OUTPUT_DIR}/OpenSSL.xcframework/ios-x86_64-simulator/Headers" \
-#       "${OUTPUT_DIR}/OpenSSL.xcframework/ios-arm64_x86_64-simulator/Headers"
-# cp -r "${OUTPUT_DIR}/OpenSSL.xcframework/ios-x86_64-simulator/OpenSSL.a" \
-#       "${OUTPUT_DIR}/OpenSSL.xcframework/ios-arm64_x86_64-simulator/OpenSSL.a"
-      
-#rm -r "${OUTPUT_DIR}/OpenSSL.xcframework/ios-x86_64-simulator"
-#rm -r "${OUTPUT_DIR}/OpenSSL.xcframework/macos-x86_64"
-     
-mkdir -p "${OUTPUT_DIR}/OpenSSL.xcframework/ios-arm64_x86_64-simulator"
-cp -r "${OUTPUT_DIR}/OpenSSL.xcframework/ios-arm64-simulator/Headers" \
-      "${OUTPUT_DIR}/OpenSSL.xcframework/ios-arm64_x86_64-simulator/Headers"
-lipo -create \
-     "${OUTPUT_DIR}/OpenSSL.xcframework/ios-arm64-simulator/OpenSSL.a" \
-     "${OUTPUT_DIR}/OpenSSL.xcframework/ios-x86_64-simulator/OpenSSL.a" \
-     -o "${OUTPUT_DIR}/OpenSSL.xcframework/ios-arm64_x86_64-simulator/OpenSSL.a"
-     
-lipo -info "${OUTPUT_DIR}/OpenSSL.xcframework/ios-arm64_x86_64-simulator/OpenSSL.a"
-rm -r "${OUTPUT_DIR}/OpenSSL.xcframework/ios-arm64-simulator"
-rm -r "${OUTPUT_DIR}/OpenSSL.xcframework/ios-x86_64-simulator"
+rm -r "${XCFRAMEWORK_PATH}/macos-arm64"
+rm -r "${XCFRAMEWORK_PATH}/macos-x86_64"
 
-#xcodebuild -create-xcframework $XCFRAMEWORK_CREATE_ARGS -output "${OUTPUT_DIR}/OpenSSL.xcframework"
+# Combine iOS Simulator libraries     
+mkdir -p "${XCFRAMEWORK_PATH}/ios-arm64_x86_64-simulator"
+cp -r "${XCFRAMEWORK_PATH}/ios-arm64-simulator/Headers" \
+      "${XCFRAMEWORK_PATH}/ios-arm64_x86_64-simulator/Headers"
+lipo -create \
+     "${XCFRAMEWORK_PATH}/ios-arm64-simulator/OpenSSL.a" \
+     "${XCFRAMEWORK_PATH}/ios-x86_64-simulator/OpenSSL.a" \
+     -o "${XCFRAMEWORK_PATH}/ios-arm64_x86_64-simulator/OpenSSL.a"
+     
+rm -r "${XCFRAMEWORK_PATH}/ios-arm64-simulator"
+rm -r "${XCFRAMEWORK_PATH}/ios-x86_64-simulator"
 
 printf "Complete! The libraries is located in ${OUTPUT_DIR}\n"
 open ${OUTPUT_DIR}
