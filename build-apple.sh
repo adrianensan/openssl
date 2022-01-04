@@ -1,7 +1,8 @@
 #!/bin/sh
-source "$(pwd)/progress_indicator.sh"
+source "$(pwd)/resources/progress_indicator.sh"
 
 OPENSSL_VERSION="1.1.1l"
+
 IOS_MIN_OS_VERSION="12.0"
 MACOS_MIN_OS_VERSION="10.12"
 
@@ -15,14 +16,19 @@ TARGET_IOS_SIMULATOR_X86_64="ios-x86_64-simulator";
 TARGET_MACOS_ARM64="macos-arm64";
 TARGET_MACOS_X86_64="macos-x86_64";
 
+# XCFramework Targets
+XCFRAMEWORK_TARGET_IOS_DEVICE="ios-arm64";
+XCFRAMEWORK_TARGET_IOS_SIMULATOR="ios-arm64_x86_64-simulator";
+XCFRAMEWORK_TARGET_MACOS="macos-arm64_x86_64";
+
 BASE_DIR="$(pwd)"
 BUILD_DIR="$(pwd)/build"
-OUTPUT_DIR="${BUILD_DIR}/output"
 LOGS_PATH="${BUILD_DIR}/logs"
-INFO_PLIST_PATH="$(pwd)/resources/Info.plist"
+RESOURCES_PATH="${BASE_DIR}/resources"
 
 ALL_TARGETS="${TARGET_IOS_DEVICE_ARM64} ${TARGET_IOS_SIMULATOR_ARM64} ${TARGET_IOS_SIMULATOR_X86_64} ${TARGET_MACOS_ARM64} ${TARGET_MACOS_X86_64}"
-XCFRAMEWORK_PATH="${OUTPUT_DIR}/OpenSSL.xcframework"
+ALL_XCFRAMEWORK_TARGETS="${XCFRAMEWORK_TARGET_IOS_DEVICE} ${XCFRAMEWORK_TARGET_IOS_SIMULATOR} ${XCFRAMEWORK_TARGET_MACOS}"
+XCFRAMEWORK_PATH="${BASE_DIR}/OpenSSL.xcframework"
 
 function min_os_version {
   case $(platform $1) in
@@ -44,6 +50,18 @@ function openssl_target { case "$1" in
     $TARGET_IOS_SIMULATOR_X86_64) echo "ios-x86_64-simulator";;
     $TARGET_MACOS_ARM64) echo "darwin64-arm64-cc";;
     $TARGET_MACOS_X86_64) echo "darwin64-x86_64-cc";;
+esac }
+
+function xcframework_target_dependencies { case "$1" in
+    $XCFRAMEWORK_TARGET_IOS_DEVICE) echo "${TARGET_IOS_DEVICE_ARM64}";;
+    $XCFRAMEWORK_TARGET_IOS_SIMULATOR) echo "${TARGET_IOS_SIMULATOR_ARM64} ${TARGET_IOS_SIMULATOR_X86_64}";;
+    $XCFRAMEWORK_TARGET_MACOS) echo "${TARGET_MACOS_ARM64} ${TARGET_MACOS_X86_64}";;
+esac }
+
+function cf_platform { case "$1" in
+    $XCFRAMEWORK_TARGET_IOS_DEVICE) echo "iPhoneOS";;
+    $XCFRAMEWORK_TARGET_IOS_SIMULATOR) echo "iPhoneSimulator";;
+    $XCFRAMEWORK_TARGET_MACOS) echo "MACOSX";;
 esac }
 
 function platform { case "$1" in
@@ -103,29 +121,82 @@ function build_openssl { target="${1}"
   fi
 }
 
-function make_xcframework { target="${1}"
-  openssl_path="${BUILD_DIR}/openssl-output/${target}"
-  framework_path="${XCFRAMEWORK_PATH}/${target}"
-  mkdir -p "${framework_path}/Headers/openssl"
-  libtool -static -no_warning_for_no_symbols \
-    -o ${framework_path}/OpenSSL.a \
-    "${openssl_path}/lib/libcrypto.a" "${openssl_path}/lib/libssl.a"
-  cp -r ${openssl_path}/include/openssl/* ${framework_path}/Headers/openssl/
+function make_framework { target="${1}"
+  dependencies_string=( "$(xcframework_target_dependencies $target)" )
+  framework_path="${XCFRAMEWORK_PATH}/${target}/OpenSSL.framework"
+  mkdir -p "${framework_path}/Headers"
+  mkdir -p "${framework_path}/Modules"
+  cd $framework_path
+  
+  dependencies=()
+  # Combine static libraries
+  for openssl_dep_target in ${dependencies_string}; do
+    dependencies+=($openssl_dep_target)
+    openssl_lib_path="${BUILD_DIR}/openssl-output/${openssl_dep_target}/lib"
+    libtool -static -no_warning_for_no_symbols \
+      -o "OpenSSL-${openssl_dep_target}" \
+      "${openssl_lib_path}/libcrypto.a" "${openssl_lib_path}/libssl.a"
+  done
+  
+  openssl_path="${BUILD_DIR}/openssl-output/${dependencies[0]}"
+  apple_target=${dependencies[0]}
+  
+  # Lipo together static libraries if target has multiple archs
+  if [ "${#dependencies[@]}" == 2 ]; then
+    lipo -create \
+      "OpenSSL-${dependencies[0]}" \
+      "OpenSSL-${dependencies[1]}" \
+      -o "OpenSSL"
+     
+    rm "OpenSSL-${dependencies[0]}"
+    rm "OpenSSL-${dependencies[1]}"
+  else
+    mv "OpenSSL-${dependencies[0]}" "OpenSSL"
+  fi
+  chmod +x OpenSSL
+  
+  # Manage Headers
+  cp -r ${openssl_path}/include/openssl/* Headers/
+  # This header causes a warning if not included, and compile error if included. Just remove it
+  rm "Headers/asn1_mac.h" &>/dev/null
+  # Fix modular build error: replace <inttypes.h> with <sys/types.h>
+  find "Headers" -type f -name "*.h" -exec sed -i "" -e "s/include <inttypes\.h>/include <sys\/types\.h>/g" {} \;
+  cp "${RESOURCES_PATH}/OpenSSL.h" "Headers/OpenSSL.h"
+  
+  # Manage Info.plist
+  cp "${RESOURCES_PATH}/Info-framework.plist" "Info.plist"
+  /usr/libexec/PlistBuddy -c "Add CFBundleSupportedPlatforms: string $(cf_platform $target)" "Info.plist"
+  if [ "$(platform $apple_target)" == $PLATFORM_MACOS ]; then
+    /usr/libexec/PlistBuddy -c "Add :LSMinimumSystemVersion string $(min_os_version $apple_target)" "Info.plist"
+  else
+    /usr/libexec/PlistBuddy -c "Add :MinimumOSVersion string $(min_os_version $apple_target)" "Info.plist"
+  fi
+  
+  cp "${RESOURCES_PATH}/module.modulemap" "Modules/module.modulemap"
+  
+  if [ "$(platform $apple_target)" == $PLATFORM_MACOS ]; then
+    mkdir -p "Versions/A/Resources"
+    mv "OpenSSL" "Headers" "Modules" "Versions/A"
+    mv "Info.plist" "Versions/A/Resources"
+  
+    (cd "Versions" && ln -s "A" "Current")
+    ln -s "Versions/Current/OpenSSL"
+    ln -s "Versions/Current/Headers"
+    ln -s "Versions/Current/Modules"
+    ln -s "Versions/Current/Resources"
+  fi
 }
 
 function build_target { target="${1}"
   build_openssl ${target}
-  make_xcframework ${target}
 }
 
 while test $# -gt 0; do
   case "$1" in
     -h|--help)
-      printf "Usage: build.sh platform [options]\n\n"
-      echo "platform: apple|ios|macos"
+      printf "Usage: build.sh [options]\n\n"
       echo "options:"
       echo "  -h, --help         show help"
-      echo "  -v, --verbose      verbose output"
       echo "  --clean            build from scratch"
       echo "  --clean-full       build from scratch, and clear output and downloads"
       exit 0;;
@@ -140,10 +211,8 @@ while test $# -gt 0; do
       progress_show "Cleaning up"
       rm -rf "target" &>/dev/null
       rm -rf "${BUILD_DIR}" &>/dev/null
-      rm -rf "${OUTPUT_DIR}" &>/dev/null
       progress_end $?
       shift;;
-    -v|--verbose) OUTPUT=/dev/tty; shift;;
     *)
       printf "Invalid argument ${!#}\n"
       trap - EXIT
@@ -152,40 +221,20 @@ while test $# -gt 0; do
   esac
 done
 
-rm -r $OUTPUT_DIR &>/dev/null
+rm -r $XCFRAMEWORK_PATH &>/dev/null
 rm -r $LOGS_PATH &>/dev/null
 mkdir -p "${LOGS_PATH}"
 mkdir -p "${XCFRAMEWORK_PATH}"
 
-cp $INFO_PLIST_PATH "${XCFRAMEWORK_PATH}/Info.plist"
+cp "${RESOURCES_PATH}/Info-xcframework.plist" "${XCFRAMEWORK_PATH}/Info.plist"
 
 for target in ${ALL_TARGETS}; do
-  build_target ${target}
+  build_openssl ${target}
 done
 
-# Combine macOS libraries
-mkdir -p "${XCFRAMEWORK_PATH}/macos-arm64_x86_64"
-cp -r "${XCFRAMEWORK_PATH}/macos-arm64/Headers" \
-      "${XCFRAMEWORK_PATH}/macos-arm64_x86_64/Headers"
-lipo -create \
-     "${XCFRAMEWORK_PATH}/macos-arm64/OpenSSL.a" \
-     "${XCFRAMEWORK_PATH}/macos-x86_64/OpenSSL.a" \
-     -o "${XCFRAMEWORK_PATH}/macos-arm64_x86_64/OpenSSL.a"
-     
-rm -r "${XCFRAMEWORK_PATH}/macos-arm64"
-rm -r "${XCFRAMEWORK_PATH}/macos-x86_64"
+for target in ${ALL_XCFRAMEWORK_TARGETS}; do
+  make_framework ${target}
+done
 
-# Combine iOS Simulator libraries     
-mkdir -p "${XCFRAMEWORK_PATH}/ios-arm64_x86_64-simulator"
-cp -r "${XCFRAMEWORK_PATH}/ios-arm64-simulator/Headers" \
-      "${XCFRAMEWORK_PATH}/ios-arm64_x86_64-simulator/Headers"
-lipo -create \
-     "${XCFRAMEWORK_PATH}/ios-arm64-simulator/OpenSSL.a" \
-     "${XCFRAMEWORK_PATH}/ios-x86_64-simulator/OpenSSL.a" \
-     -o "${XCFRAMEWORK_PATH}/ios-arm64_x86_64-simulator/OpenSSL.a"
-     
-rm -r "${XCFRAMEWORK_PATH}/ios-arm64-simulator"
-rm -r "${XCFRAMEWORK_PATH}/ios-x86_64-simulator"
-
-printf "Complete! The libraries is located in ${OUTPUT_DIR}\n"
-open ${OUTPUT_DIR}
+printf "Complete! XCFramework generated at ${XCFRAMEWORK_PATH}\n"
+open ${BASE_DIR}
