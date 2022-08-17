@@ -1,10 +1,10 @@
 #!/bin/sh
 source "$(pwd)/resources/progress_indicator.sh"
 
-OPENSSL_VERSION="1.1.1l"
+OPENSSL_VERSION="3.0.4"
 
-IOS_MIN_OS_VERSION="12.0"
-MACOS_MIN_OS_VERSION="10.12"
+IOS_MIN_OS_VERSION="15.0"
+MACOS_MIN_OS_VERSION="12.0"
 
 PLATFORM_IOS="iOS"
 PLATFORM_MACOS="macOS"
@@ -29,7 +29,7 @@ RESOURCES_PATH="${BASE_DIR}/resources"
 ALL_TARGETS="${TARGET_IOS_DEVICE_ARM64} ${TARGET_IOS_SIMULATOR_ARM64} ${TARGET_IOS_SIMULATOR_X86_64} ${TARGET_MACOS_ARM64} ${TARGET_MACOS_X86_64}"
 ALL_XCFRAMEWORK_TARGETS="${XCFRAMEWORK_TARGET_IOS_DEVICE} ${XCFRAMEWORK_TARGET_IOS_SIMULATOR} ${XCFRAMEWORK_TARGET_MACOS}"
 XCFRAMEWORK_PATH="${BASE_DIR}/OpenSSL.xcframework"
-
+export OPENSSL_NO_ENGINE
 function min_os_version {
   case $(platform $1) in
     $PLATFORM_IOS) echo ${IOS_MIN_OS_VERSION};;
@@ -39,17 +39,17 @@ function min_os_version {
 
 function config_flags {
   case $(platform $1) in
-    $PLATFORM_IOS) echo "no-shared -mios-version-min=${IOS_MIN_OS_VERSION}" -fembed-bitcode;;
+    $PLATFORM_IOS) echo "-mios-version-min=${IOS_MIN_OS_VERSION}";;
     $PLATFORM_MACOS) echo "-mmacosx-version-min=${MACOS_MIN_OS_VERSION}";;
   esac
 }
 
 function openssl_target { case "$1" in
-    $TARGET_IOS_DEVICE_ARM64) echo "ios64-xcrun";;
+    $TARGET_IOS_DEVICE_ARM64) echo "ios-arm64";;
     $TARGET_IOS_SIMULATOR_ARM64) echo "ios-arm64-simulator";;
     $TARGET_IOS_SIMULATOR_X86_64) echo "ios-x86_64-simulator";;
-    $TARGET_MACOS_ARM64) echo "darwin64-arm64-cc";;
-    $TARGET_MACOS_X86_64) echo "darwin64-x86_64-cc";;
+    $TARGET_MACOS_ARM64) echo "macos-arm64";;
+    $TARGET_MACOS_X86_64) echo "darwin64-x86_64";;
 esac }
 
 function xcframework_target_dependencies { case "$1" in
@@ -81,7 +81,7 @@ function name { case "$1" in
 esac }
 
 function build_openssl { target="${1}"
-  export OPENSSL_DIR="${BUILD_DIR}/openssl-output/${target}"
+  export OPENSSL_DIR="${BUILD_DIR}/openssl-${OPENSSL_VERSION}-output/${target}"
   export OPENSSL_LIB_DIR=${OPENSSL_DIR}
   export OPENSSL_INCLUDE_DIR=${OPENSSL_DIR}/include
 
